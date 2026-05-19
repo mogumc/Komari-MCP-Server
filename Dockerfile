@@ -25,21 +25,9 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build \
     -o komari-mcp ./cmd/server
 
 # ─────────────────────────────────────────────────────────────
-# 运行阶段
+# 运行阶段 - distroless
 # ─────────────────────────────────────────────────────────────
-FROM alpine:3.19
-
-# 安装运行时依赖
-RUN apk add --no-cache ca-certificates tzdata
-
-# 创建非 root 用户
-RUN addgroup -g 1000 komari && \
-    adduser -u 1000 -G komari -s /bin/sh -D komari
-
-WORKDIR /app
-
-# 复制二进制文件
-COPY --from=builder /app/komari-mcp /usr/local/bin/
+FROM gcr.io/distroless/static-debian12
 
 # 复制时区数据
 COPY --from=builder /usr/share/zoneinfo /usr/share/zoneinfo
@@ -47,8 +35,8 @@ COPY --from=builder /usr/share/zoneinfo /usr/share/zoneinfo
 # 设置时区
 ENV TZ=Asia/Shanghai
 
-# 切换到非 root 用户
-USER komari
+# 使用 distroless 内置 nonroot 用户
+USER nonroot:nonroot
 
 # 暴露端口
 EXPOSE 8080
