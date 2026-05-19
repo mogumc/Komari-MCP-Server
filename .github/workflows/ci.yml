@@ -74,7 +74,7 @@ jobs:
         run: go test -v -race ./...
 
   # ─────────────────────────────────────────────────────────────────────────────
-  # Docker: 构建并推送镜像（每个架构单独构建，最后合并 manifest）
+  # Docker: 构建并推送镜像
   # ─────────────────────────────────────────────────────────────────────────────
   docker:
     needs: [build, test]
@@ -135,9 +135,17 @@ jobs:
           context: .
           platforms: ${{ matrix.platform }}
           push: true
-          tags: |
-            ${{ steps.meta.outputs.tags }}-${{ matrix.arch }}
-            ${{ matrix.arch == 'amd64' && 'ghcr.io/mogumc/komari-mcp-server:latest' || '' }}
+          tags: ${{ steps.meta.outputs.tags }}-${{ matrix.arch }}
+          labels: ${{ steps.meta.outputs.labels }}
+
+      - name: Push latest tag (amd64, tag release only)
+        if: matrix.arch == 'amd64' && github.ref_type == 'tag'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64
+          push: true
+          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
           labels: ${{ steps.meta.outputs.labels }}
 
   # ─────────────────────────────────────────────────────────────────────────────
@@ -177,10 +185,9 @@ jobs:
 
       - name: Create and push manifest
         run: |
-          IMAGE=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
-          for tag in ${{ steps.meta.outputs.tags }}; do
-            docker buildx imagetools create -t ${tag} \
-              ${tag}-amd64 ${tag}-arm64
-          done
-          docker buildx imagetools create -t ${IMAGE}:latest \
-            ${IMAGE}:latest-amd64 ${IMAGE}:latest-arm64
+          TAGS='${{ steps.meta.outputs.tags }}'
+          while IFS= read -r tag; do
+            [ -z "$tag" ] && continue
+            docker buildx imagetools create -t "${tag}" \
+              "${tag}-amd64" "${tag}-arm64"
+          done <<< "$TAGS"
