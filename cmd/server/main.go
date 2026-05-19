@@ -1,0 +1,515 @@
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"log"
+	"net/http"
+	"os"
+	"os/signal"
+	"sync"
+	"syscall"
+
+	"github.com/gorilla/websocket"
+	"github.com/mogumc/komari-mcp/internal/komari"
+)
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Transport Mode
+// ──────────────────────────────────────────────────────────────────────────────
+
+type TransportMode string
+
+const (
+	ModeStdio TransportMode = "stdio"
+	ModeHTTP  TransportMode = "http"
+)
+
+// ──────────────────────────────────────────────────────────────────────────────
+// MCP Types
+// ──────────────────────────────────────────────────────────────────────────────
+
+type Tool struct {
+	Name        string `json:"name"`
+	Description string `json:"description"`
+	InputSchema any    `json:"inputSchema"`
+}
+
+type ToolCall struct {
+	Name      string          `json:"name"`
+	Arguments json.RawMessage `json:"arguments"`
+}
+
+type MCPRequest struct {
+	JSONRPC string          `json:"jsonrpc"`
+	Method  string          `json:"method"`
+	Params  json.RawMessage `json:"params,omitempty"`
+	ID      any             `json:"id,omitempty"`
+}
+
+type MCPResponse struct {
+	JSONRPC string          `json:"jsonrpc"`
+	Result  any             `json:"result,omitempty"`
+	Error   any             `json:"error,omitempty"`
+	ID      any             `json:"id,omitempty"`
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Tool Definitions
+// ──────────────────────────────────────────────────────────────────────────────
+
+var toolList = []Tool{
+	{
+		Name:        "komari_get_public_info",
+		Description: "获取 Komari 站点的公开配置（站点名称、主题、CORS 设置等）。无需认证。",
+		InputSchema: map[string]any{
+			"type":       "object",
+			"properties": map[string]any{},
+		},
+	},
+	{
+		Name:        "komari_get_version",
+		Description: "获取 Komari 服务端版本号和构建哈希。无需认证。",
+		InputSchema: map[string]any{
+			"type":       "object",
+			"properties": map[string]any{},
+		},
+	},
+	{
+		Name:        "komari_get_nodes",
+		Description: "获取所有节点或指定节点的信息（名称、CPU、内存、磁盘、OS 等）。",
+		InputSchema: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"uuid": map[string]any{"type": "string", "description": "节点 UUID，留空获取全部"},
+			},
+		},
+	},
+	{
+		Name:        "komari_get_latest_status",
+		Description: "获取一个或多个节点的最新实时状态（CPU/内存/磁盘/网络速度/在线状态）。",
+		InputSchema: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"uuid":  map[string]any{"type": "string", "description": "单个节点 UUID"},
+				"uuids": map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "多个节点 UUID 列表"},
+			},
+		},
+	},
+	{
+		Name:        "komari_get_recent_status",
+		Description: "获取指定节点最近约 1 分钟内的状态记录列表。",
+		InputSchema: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"uuid": map[string]any{"type": "string", "description": "节点 UUID（必填）"},
+			},
+			"required": []any{"uuid"},
+		},
+	},
+	{
+		Name:        "komari_get_records",
+		Description: "获取节点的历史监控记录（负载数据或 Ping 延迟）。",
+		InputSchema: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"type":      map[string]any{"type": "string", "enum": []any{"load", "ping"}, "description": "记录类型：load 或 ping"},
+				"uuid":      map[string]any{"type": "string", "description": "节点 UUID，留空表示全部"},
+				"hours":     map[string]any{"type": "integer", "description": "时间范围（小时），默认 1"},
+				"load_type": map[string]any{"type": "string", "description": "指标类型: cpu/gpu/ram/swap/load/temp/disk/network/process/connections/all"},
+				"max_count": map[string]any{"type": "integer", "description": "数据点上限，默认 4000"},
+			},
+			"required": []any{"type"},
+		},
+	},
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// MCP Server
+// ──────────────────────────────────────────────────────────────────────────────
+
+type MCPServer struct {
+	client    *komari.Client
+	tools     []Tool
+	clients   map[*websocket.Conn]bool
+	clientsMu sync.Mutex
+	broadcast chan MCPResponse
+}
+
+func NewMCPServer(client *komari.Client) *MCPServer {
+	return &MCPServer{
+		client:    client,
+		tools:     toolList,
+		clients:   make(map[*websocket.Conn]bool),
+		broadcast: make(chan MCPResponse, 100),
+	}
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Transport: Stdio
+// ──────────────────────────────────────────────────────────────────────────────
+
+func (s *MCPServer) runStdio() {
+	dec := json.NewDecoder(os.Stdin)
+	for dec.More() {
+		var req MCPRequest
+		if err := dec.Decode(&req); err != nil {
+			if err != io.EOF {
+				log.Printf("decode error: %v", err)
+			}
+			continue
+		}
+		s.stdioHandle(req)
+	}
+}
+
+func (s *MCPServer) stdioHandle(req MCPRequest) {
+	resp := s.processRequest(req)
+	if resp == nil {
+		return
+	}
+	if err := json.NewEncoder(os.Stdout).Encode(resp); err != nil {
+		log.Printf("stdio write error: %v", err)
+	}
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Transport: HTTP
+// ──────────────────────────────────────────────────────────────────────────────
+
+func (s *MCPServer) runHTTP(addr string) error {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/mcp", s.handleMCP)
+	mux.HandleFunc("/ws", s.handleWebSocket)
+	mux.HandleFunc("/health", s.handleHealth)
+
+	srv := &http.Server{
+		Addr:    addr,
+		Handler: mux,
+	}
+
+	// 启动 WebSocket 广播协程
+	go s.wsBroadcaster()
+
+	// 优雅关闭
+	go func() {
+		sigCh := make(chan os.Signal, 1)
+		signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+		<-sigCh
+		log.Println("shutting down...")
+		srv.Shutdown(context.Background())
+	}()
+
+	log.Printf("MCP HTTP server listening on %s", addr)
+	return srv.ListenAndServe()
+}
+
+func (s *MCPServer) handleHealth(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+}
+
+func (s *MCPServer) handleMCP(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	contentType := r.Header.Get("Content-Type")
+	if contentType == "" || contentType == "application/json" {
+		var req MCPRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			s.sendHTTPError(w, nil, -32700, "Parse error")
+			return
+		}
+		resp := s.processRequest(req)
+		if resp != nil {
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(resp)
+		}
+	} else if contentType == "application/jsonl" || contentType == "application/jsonl+batch" {
+		var responses []MCPResponse
+		dec := json.NewDecoder(r.Body)
+		for dec.More() {
+			var req MCPRequest
+			if err := dec.Decode(&req); err == nil {
+				if resp := s.processRequest(req); resp != nil {
+					responses = append(responses, *resp)
+				}
+			}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(responses)
+	} else {
+		http.Error(w, "Unsupported content type", http.StatusUnsupportedMediaType)
+	}
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// WebSocket
+// ──────────────────────────────────────────────────────────────────────────────
+
+var upgrader = websocket.Upgrader{
+	CheckOrigin: func(r *http.Request) bool {
+		// 生产环境应配置具体的允许域名列表
+		return true
+	},
+}
+
+func (s *MCPServer) handleWebSocket(w http.ResponseWriter, r *http.Request) {
+	conn, err := upgrader.Upgrade(w, r, nil)
+	if err != nil {
+		log.Printf("WebSocket upgrade error: %v", err)
+		return
+	}
+	defer conn.Close()
+
+	s.clientsMu.Lock()
+	s.clients[conn] = true
+	s.clientsMu.Unlock()
+	defer func() {
+		s.clientsMu.Lock()
+		delete(s.clients, conn)
+		s.clientsMu.Unlock()
+	}()
+
+	for {
+		_, msg, err := conn.ReadMessage()
+		if err != nil {
+			break
+		}
+
+		var req MCPRequest
+		if err := json.Unmarshal(msg, &req); err != nil {
+			continue
+		}
+
+		if resp := s.processRequest(req); resp != nil {
+			conn.WriteJSON(resp)
+		}
+	}
+}
+
+func (s *MCPServer) wsBroadcaster() {
+	for resp := range s.broadcast {
+		s.clientsMu.Lock()
+		for conn := range s.clients {
+			if err := conn.WriteJSON(resp); err != nil {
+				conn.Close()
+				delete(s.clients, conn)
+			}
+		}
+		s.clientsMu.Unlock()
+	}
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Request Processing
+// ──────────────────────────────────────────────────────────────────────────────
+
+func (s *MCPServer) processRequest(req MCPRequest) *MCPResponse {
+	var resp MCPResponse
+	resp.JSONRPC = "2.0"
+	resp.ID = req.ID
+
+	switch req.Method {
+	case "initialize":
+		resp.Result = handleInitialize()
+
+	case "tools/list":
+		resp.Result = map[string]any{"tools": s.tools}
+
+	case "tools/call":
+		var tc ToolCall
+		if err := json.Unmarshal(req.Params, &tc); err != nil {
+			resp.Error = map[string]any{"code": -32600, "message": "Invalid request: " + err.Error()}
+			return &resp
+		}
+		result, err := s.callTool(tc.Name, tc.Arguments)
+		if err != nil {
+			resp.Error = map[string]any{"code": -32603, "message": err.Error()}
+			return &resp
+		}
+		resp.Result = result
+
+	case "ping":
+		resp.Result = map[string]string{"pong": "ok"}
+
+	case "notifications/initialized", "notifications/stopped":
+		return nil
+
+	default:
+		resp.Error = map[string]any{"code": -32601, "message": fmt.Sprintf("method not found: %s", req.Method)}
+	}
+
+	return &resp
+}
+
+func (s *MCPServer) sendHTTPError(w http.ResponseWriter, req *MCPRequest, code int, message string) {
+	resp := MCPResponse{
+		JSONRPC: "2.0",
+		Error:   map[string]any{"code": code, "message": message},
+	}
+	if req != nil {
+		resp.ID = req.ID
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(resp)
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Tool Router
+// ──────────────────────────────────────────────────────────────────────────────
+
+func (s *MCPServer) callTool(name string, rawArgs json.RawMessage) (any, error) {
+	switch name {
+	case "komari_get_public_info":
+		info, err := s.client.GetPublicInfo()
+		if err != nil {
+			return nil, err
+		}
+		return textContent(info), nil
+
+	case "komari_get_version":
+		v, err := s.client.GetVersion()
+		if err != nil {
+			return nil, err
+		}
+		return textContent(v), nil
+
+	case "komari_get_nodes":
+		var args struct {
+			UUID string `json:"uuid"`
+		}
+		if len(rawArgs) > 0 && json.Unmarshal(rawArgs, &args) != nil {
+			return nil, fmt.Errorf("invalid arguments")
+		}
+		nodes, err := s.client.GetNodes(args.UUID)
+		if err != nil {
+			return nil, err
+		}
+		return textContent(nodes), nil
+
+	case "komari_get_latest_status":
+		var args struct {
+			UUID  string   `json:"uuid"`
+			UUIDs []string `json:"uuids"`
+		}
+		if len(rawArgs) > 0 && json.Unmarshal(rawArgs, &args) != nil {
+			return nil, fmt.Errorf("invalid arguments")
+		}
+		status, err := s.client.GetNodesLatestStatus(args.UUID, args.UUIDs)
+		if err != nil {
+			return nil, err
+		}
+		return textContent(status), nil
+
+	case "komari_get_recent_status":
+		var args struct {
+			UUID string `json:"uuid"`
+		}
+		if len(rawArgs) > 0 && json.Unmarshal(rawArgs, &args) != nil {
+			return nil, fmt.Errorf("invalid arguments")
+		}
+		if args.UUID == "" {
+			return nil, fmt.Errorf("uuid is required")
+		}
+		rec, err := s.client.GetNodeRecentStatus(args.UUID)
+		if err != nil {
+			return nil, err
+		}
+		return textContent(rec), nil
+
+	case "komari_get_records":
+		var args struct {
+			Type     string `json:"type"`
+			UUID     string `json:"uuid"`
+			Hours    int    `json:"hours"`
+			LoadType string `json:"load_type"`
+			MaxCount int    `json:"max_count"`
+		}
+		if len(rawArgs) > 0 && json.Unmarshal(rawArgs, &args) != nil {
+			return nil, fmt.Errorf("invalid arguments")
+		}
+		if args.Type == "" {
+			return nil, fmt.Errorf("type (load or ping) is required")
+		}
+		if args.Hours == 0 {
+			args.Hours = 1
+		}
+		rec, err := s.client.GetRecords(args.Type, args.UUID, args.Hours, args.MaxCount, args.LoadType, "")
+		if err != nil {
+			return nil, err
+		}
+		return textContent(rec), nil
+
+	default:
+		return nil, fmt.Errorf("unknown tool: %s", name)
+	}
+}
+
+func textContent(v any) any {
+	b, _ := json.MarshalIndent(v, "", "  ")
+	return map[string]any{
+		"content": []map[string]any{
+			{"type": "text", "text": string(b)},
+		},
+	}
+}
+
+func handleInitialize() map[string]any {
+	return map[string]any{
+		"protocolVersion": "2024-11-05",
+		"capabilities": map[string]any{
+			"tools": map[string]any{},
+		},
+		"serverInfo": map[string]any{
+			"name":    "komari-mcp",
+			"version": version,
+		},
+	}
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// main
+// ──────────────────────────────────────────────────────────────────────────────
+
+var version = "dev"
+
+func main() {
+	baseURL := os.Getenv("KOMARI_BASE_URL")
+	apiKey := os.Getenv("KOMARI_API_KEY")
+
+	if baseURL == "" {
+		log.Fatal("KOMARI_BASE_URL environment variable is required")
+	}
+	if apiKey == "" {
+		log.Fatal("KOMARI_API_KEY environment variable is required")
+	}
+
+	mode := TransportMode(os.Getenv("KOMARI_TRANSPORT"))
+	if mode == "" {
+		mode = ModeStdio
+	}
+
+	addr := os.Getenv("KOMARI_HTTP_ADDR")
+	if addr == "" {
+		addr = ":8080"
+	}
+
+	client := komari.NewClient(baseURL, apiKey)
+	server := NewMCPServer(client)
+
+	if mode == ModeHTTP {
+		log.Printf("Starting in HTTP mode on %s", addr)
+		if err := server.runHTTP(addr); err != nil && err != http.ErrServerClosed {
+			log.Fatalf("HTTP server error: %v", err)
+		}
+	} else {
+		log.Println("Starting in stdio mode")
+		server.runStdio()
+	}
+}
