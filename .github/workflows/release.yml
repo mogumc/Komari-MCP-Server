@@ -52,9 +52,8 @@ jobs:
         run: |
           mkdir -p dist
           EXT=""
-          if [ "$GOOS" = "windows" ]; then EXT=".exe"; fi
-          cd src
-          go build -trimpath -ldflags "-s -w -X main.version=${{ steps.version.outputs.VERSION }}" \
+          if [ "$GOOS" = "windows" ]; then EXT=".exe"; fi        
+          go build -ldflags="-s -w -X main.version=${{ steps.version.outputs.VERSION }}" \
             -o./dist/komari-mcp-${{ matrix.goos }}-${{ matrix.goarch }}${EXT} ./cmd/server/
 
       - name: Upload artifact
