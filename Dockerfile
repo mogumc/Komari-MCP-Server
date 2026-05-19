@@ -29,6 +29,9 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build \
 # ─────────────────────────────────────────────────────────────
 FROM gcr.io/distroless/static-debian12
 
+# 复制可执行文件
+COPY --from=builder /app/komari-mcp /komari-mcp
+
 # 复制时区数据
 COPY --from=builder /usr/share/zoneinfo /usr/share/zoneinfo
 
