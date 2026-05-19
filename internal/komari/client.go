@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/mogumc/komari-mcp/internal/rpc2"
+	"github.com/mogumc/komari-mcp-server/internal/rpc2"
 )
 
 // Client wraps all Komari API interactions.
@@ -52,7 +52,6 @@ func (c *Client) call(method string, params any) ([]byte, error) {
 		return nil, fmt.Errorf("marshal request: %w", err)
 	}
 
-	// 正确拼接 BaseURL 和 API 路径
 	apiURL := strings.TrimSuffix(c.BaseURL, "/") + "/api/rpc2"
 	req, err := http.NewRequest(http.MethodPost, apiURL, bytes.NewReader(reqBody))
 	if err != nil {
@@ -116,11 +115,62 @@ func (c *Client) GetVersion() (*rpc2.VersionInfo, error) {
 }
 
 // ──────────────────────────────────────────────────────────────────
+// 合并端点
+// ──────────────────────────────────────────────────────────────────
+
+// GetNodesWithStatus 合并 getNodes + getNodesLatestStatus，一次调用获取节点信息和实时状态。
+// 这样就可以透过节点名称获取到节点信息和实时状态，避免了两次调用。
+func (c *Client) GetNodesWithStatus(uuid string) (map[string]rpc2.NodeWithStatus, error) {
+
+	type nodesResult struct {
+		nodes map[string]rpc2.NodeInfo
+		err   error
+	}
+	type statusResult struct {
+		status map[string]rpc2.NodeStatus
+		err    error
+	}
+
+	chNodes := make(chan nodesResult, 1)
+	chStatus := make(chan statusResult, 1)
+
+	go func() {
+		nodes, err := c.GetNodes(uuid)
+		chNodes <- nodesResult{nodes, err}
+	}()
+	go func() {
+		status, err := c.GetNodesLatestStatus(uuid, nil)
+		chStatus <- statusResult{status, err}
+	}()
+
+	nr := <-chNodes
+	sr := <-chStatus
+
+	// 任一失败则返回错误
+	if nr.err != nil {
+		return nil, fmt.Errorf("getNodes: %w", nr.err)
+	}
+	if sr.err != nil {
+		return nil, fmt.Errorf("getNodesLatestStatus: %w", sr.err)
+	}
+
+	// 合并结果
+	result := make(map[string]rpc2.NodeWithStatus, len(nr.nodes))
+	for id, info := range nr.nodes {
+		nws := rpc2.NodeWithStatus{NodeInfo: info}
+		if s, ok := sr.status[id]; ok {
+			nws.Status = &s
+		}
+		result[id] = nws
+	}
+	return result, nil
+}
+
+// ──────────────────────────────────────────────────────────────────
 // Authenticated endpoints
 // ──────────────────────────────────────────────────────────────────
 
 // GetNodes returns all nodes (or one by uuid).
-// Pass empty uuid for all nodes.
 func (c *Client) GetNodes(uuid string) (map[string]rpc2.NodeInfo, error) {
 	params := map[string]string{}
 	if uuid != "" {
@@ -130,11 +180,20 @@ func (c *Client) GetNodes(uuid string) (map[string]rpc2.NodeInfo, error) {
 	if err != nil {
 		return nil, err
 	}
+
 	var result map[string]rpc2.NodeInfo
-	if err := json.Unmarshal(raw, &result); err != nil {
-		return nil, fmt.Errorf("unmarshal: %w", err)
+	if err := json.Unmarshal(raw, &result); err == nil && len(result) > 0 {
+		return result, nil
 	}
-	return result, nil
+
+	if uuid != "" {
+		var single rpc2.NodeInfo
+		if err := json.Unmarshal(raw, &single); err != nil {
+			return nil, fmt.Errorf("unmarshal single node: %w", err)
+		}
+		return map[string]rpc2.NodeInfo{uuid: single}, nil
+	}
+	return nil, fmt.Errorf("unexpected getNodes response format")
 }
 
 // GetNodesLatestStatus returns latest status for one or more nodes.
@@ -150,11 +209,20 @@ func (c *Client) GetNodesLatestStatus(uuid string, uuids []string) (map[string]r
 	if err != nil {
 		return nil, err
 	}
+
 	var result map[string]rpc2.NodeStatus
-	if err := json.Unmarshal(raw, &result); err != nil {
-		return nil, fmt.Errorf("unmarshal: %w", err)
+	if err := json.Unmarshal(raw, &result); err == nil && len(result) > 0 {
+		return result, nil
 	}
-	return result, nil
+
+	if uuid != "" {
+		var single rpc2.NodeStatus
+		if err := json.Unmarshal(raw, &single); err != nil {
+			return nil, fmt.Errorf("unmarshal single node status: %w", err)
+		}
+		return map[string]rpc2.NodeStatus{uuid: single}, nil
+	}
+	return nil, fmt.Errorf("unexpected getNodesLatestStatus response format")
 }
 
 // GetNodeRecentStatus returns last ~1 minute of status records.
@@ -172,14 +240,26 @@ func (c *Client) GetNodeRecentStatus(uuid string) (*rpc2.RecentStatusResp, error
 }
 
 // GetRecords returns historical load or ping records.
-// loadType: "cpu","gpu","ram","swap","load","temp","disk","network","process","connections","all"
-func (c *Client) GetRecords(recordType, uuid string, hours, maxCount int, loadType, taskID string) (*rpc2.RecordsResponse, error) {
+func (c *Client) GetRecords(recordType, uuid string, hours, maxCount int, loadType, taskID string, start, end string) (*rpc2.RecordsResponse, error) {
 	params := map[string]any{
-		"type":  recordType,
-		"hours": hours,
+		"type": recordType,
 	}
 	if uuid != "" {
 		params["uuid"] = uuid
+	}
+	// start/end 优先于 hours
+	if start != "" || end != "" {
+		if start != "" {
+			params["start"] = start
+		}
+		if end != "" {
+			params["end"] = end
+		}
+	} else {
+		if hours <= 0 {
+			hours = 1
+		}
+		params["hours"] = hours
 	}
 	if loadType != "" {
 		params["load_type"] = loadType
@@ -187,7 +267,7 @@ func (c *Client) GetRecords(recordType, uuid string, hours, maxCount int, loadTy
 	if taskID != "" {
 		params["task_id"] = taskID
 	}
-	if maxCount > 0 {
+	if maxCount != 0 {
 		params["maxCount"] = maxCount
 	}
 	raw, err := c.call("common:getRecords", params)

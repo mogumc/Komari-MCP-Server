@@ -13,7 +13,7 @@ import (
 	"syscall"
 
 	"github.com/gorilla/websocket"
-	"github.com/mogumc/komari-mcp/internal/komari"
+	"github.com/mogumc/komari-mcp-server/internal/komari"
 )
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -50,10 +50,10 @@ type MCPRequest struct {
 }
 
 type MCPResponse struct {
-	JSONRPC string          `json:"jsonrpc"`
-	Result  any             `json:"result,omitempty"`
-	Error   any             `json:"error,omitempty"`
-	ID      any             `json:"id,omitempty"`
+	JSONRPC string `json:"jsonrpc"`
+	Result  any    `json:"result,omitempty"`
+	Error   any    `json:"error,omitempty"`
+	ID      any    `json:"id,omitempty"`
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -63,7 +63,7 @@ type MCPResponse struct {
 var toolList = []Tool{
 	{
 		Name:        "komari_get_public_info",
-		Description: "获取 Komari 站点的公开配置（站点名称、主题、CORS 设置等）。无需认证。",
+		Description: "获取 Komari 站点的公开配置（站点名称、主题、CORS 设置等）。无需认证，始终可用。",
 		InputSchema: map[string]any{
 			"type":       "object",
 			"properties": map[string]any{},
@@ -71,7 +71,7 @@ var toolList = []Tool{
 	},
 	{
 		Name:        "komari_get_version",
-		Description: "获取 Komari 服务端版本号和构建哈希。无需认证。",
+		Description: "获取 Komari 服务端版本号和构建哈希。无需认证，始终可用。",
 		InputSchema: map[string]any{
 			"type":       "object",
 			"properties": map[string]any{},
@@ -79,7 +79,7 @@ var toolList = []Tool{
 	},
 	{
 		Name:        "komari_get_nodes",
-		Description: "获取所有节点或指定节点的信息（名称、CPU、内存、磁盘、OS 等）。",
+		Description: "获取所有节点或指定节点的信息（名称、CPU、内存、磁盘、OS 等）。无 API Key 时隐藏节点和敏感字段会被过滤。",
 		InputSchema: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
@@ -89,7 +89,7 @@ var toolList = []Tool{
 	},
 	{
 		Name:        "komari_get_latest_status",
-		Description: "获取一个或多个节点的最新实时状态（CPU/内存/磁盘/网络速度/在线状态）。",
+		Description: "获取一个或多个节点的最新实时状态（CPU/内存/磁盘/网络速度/在线状态）。无 API Key 时隐藏节点被过滤。",
 		InputSchema: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
@@ -100,7 +100,7 @@ var toolList = []Tool{
 	},
 	{
 		Name:        "komari_get_recent_status",
-		Description: "获取指定节点最近约 1 分钟内的状态记录列表。",
+		Description: "获取指定节点最近约 1 分钟内的状态记录列表。无 API Key 时隐藏节点被过滤。",
 		InputSchema: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
@@ -111,17 +111,30 @@ var toolList = []Tool{
 	},
 	{
 		Name:        "komari_get_records",
-		Description: "获取节点的历史监控记录（负载数据或 Ping 延迟）。",
+		Description: "获取节点的历史监控记录（负载数据或 Ping 延迟）。支持通过 hours 或 start/end 指定时间范围。无 API Key 时隐藏节点被过滤。",
 		InputSchema: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
 				"type":      map[string]any{"type": "string", "enum": []any{"load", "ping"}, "description": "记录类型：load 或 ping"},
 				"uuid":      map[string]any{"type": "string", "description": "节点 UUID，留空表示全部"},
-				"hours":     map[string]any{"type": "integer", "description": "时间范围（小时），默认 1"},
-				"load_type": map[string]any{"type": "string", "description": "指标类型: cpu/gpu/ram/swap/load/temp/disk/network/process/connections/all"},
-				"max_count": map[string]any{"type": "integer", "description": "数据点上限，默认 4000"},
+				"hours":     map[string]any{"type": "integer", "description": "时间范围（小时），默认 1。与 start/end 互斥"},
+				"start":     map[string]any{"type": "string", "description": "起始时间 RFC3339（如 2026-01-01T00:00:00Z），与 hours 互斥"},
+				"end":       map[string]any{"type": "string", "description": "结束时间 RFC3339，缺省为当前时间"},
+				"load_type": map[string]any{"type": "string", "enum": []any{"cpu", "gpu", "ram", "swap", "load", "temp", "disk", "network", "process", "connections", "all"}, "description": "仅 type=load 时有效，指定指标类型"},
+				"task_id":   map[string]any{"type": "integer", "description": "仅 type=ping 时有效，指定任务 ID，-1 或留空表示全部"},
+				"max_count": map[string]any{"type": "integer", "description": "数据点上限，默认 4000，-1 表示不限"},
 			},
 			"required": []any{"type"},
+		},
+	},
+	{
+		Name:        "komari_get_nodes_with_status",
+		Description: "一次调用获取所有节点的静态信息（名称、CPU、内存、OS 等）和实时状态（CPU 使用率、在线状态等）。减少多次查询开销。",
+		InputSchema: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"uuid": map[string]any{"type": "string", "description": "节点 UUID，留空获取全部"},
+			},
 		},
 	},
 }
@@ -253,7 +266,6 @@ func (s *MCPServer) handleMCP(w http.ResponseWriter, r *http.Request) {
 
 var upgrader = websocket.Upgrader{
 	CheckOrigin: func(r *http.Request) bool {
-		// 生产环境应配置具体的允许域名列表
 		return true
 	},
 }
@@ -428,7 +440,10 @@ func (s *MCPServer) callTool(name string, rawArgs json.RawMessage) (any, error) 
 			Type     string `json:"type"`
 			UUID     string `json:"uuid"`
 			Hours    int    `json:"hours"`
+			Start    string `json:"start"`
+			End      string `json:"end"`
 			LoadType string `json:"load_type"`
+			TaskID   int    `json:"task_id"`
 			MaxCount int    `json:"max_count"`
 		}
 		if len(rawArgs) > 0 && json.Unmarshal(rawArgs, &args) != nil {
@@ -440,11 +455,33 @@ func (s *MCPServer) callTool(name string, rawArgs json.RawMessage) (any, error) 
 		if args.Hours == 0 {
 			args.Hours = 1
 		}
-		rec, err := s.client.GetRecords(args.Type, args.UUID, args.Hours, args.MaxCount, args.LoadType, "")
+		// load_type 仅对 type=load 有效
+		if args.Type != "load" {
+			args.LoadType = ""
+		}
+		// task_id 仅对 type=ping 有效
+		taskIDStr := ""
+		if args.Type == "ping" && args.TaskID != 0 {
+			taskIDStr = fmt.Sprintf("%d", args.TaskID)
+		}
+		rec, err := s.client.GetRecords(args.Type, args.UUID, args.Hours, args.MaxCount, args.LoadType, taskIDStr, args.Start, args.End)
 		if err != nil {
 			return nil, err
 		}
 		return textContent(rec), nil
+
+	case "komari_get_nodes_with_status":
+		var args struct {
+			UUID string `json:"uuid"`
+		}
+		if len(rawArgs) > 0 && json.Unmarshal(rawArgs, &args) != nil {
+			return nil, fmt.Errorf("invalid arguments")
+		}
+		result, err := s.client.GetNodesWithStatus(args.UUID)
+		if err != nil {
+			return nil, err
+		}
+		return textContent(result), nil
 
 	default:
 		return nil, fmt.Errorf("unknown tool: %s", name)
@@ -486,8 +523,10 @@ func main() {
 	if baseURL == "" {
 		log.Fatal("KOMARI_BASE_URL environment variable is required")
 	}
+	// API Key 可选: 公开端点 (getPublicInfo, getVersion, getNodes, getNodesLatestStatus)
+	// 无需认证即可访问，仅管理端点需要 token。
 	if apiKey == "" {
-		log.Fatal("KOMARI_API_KEY environment variable is required")
+		log.Println("KOMARI_API_KEY not set — public endpoints only (no admin/client auth)")
 	}
 
 	mode := TransportMode(os.Getenv("KOMARI_TRANSPORT"))

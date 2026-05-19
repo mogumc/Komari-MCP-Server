@@ -1,4 +1,4 @@
-module github.com/mogumc/komari-mcp
+module github.com/mogumc/komari-mcp-server
 
 go 1.22
 
