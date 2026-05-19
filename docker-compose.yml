@@ -1,6 +1,6 @@
 services:
   komari-mcp:
-    image: ghcr.io/mogumc/komari-mcp:latest
+    image: ghcr.io/mogumc/komari-mcp-server:latest
     container_name: komari-mcp
     environment:
       - KOMARI_BASE_URL=${KOMARI_BASE_URL:?KOMARI_BASE_URL is required}
