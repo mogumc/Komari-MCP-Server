@@ -1,6 +1,10 @@
-# Komari-MCP-Server
+<p align="center">
+  <a href="https://ollama.com">
+    <img src="https://github.com/mogumc/Komari-MCP-Server/raw/main/komariMCP.png" alt="komariMCP.png" width="300"/>
+  </a>
+</p>
 
-![logo](komariMCP.png)
+# Komari-MCP-Server
 
 **Go MCP server for Komari server monitoring API. Supports stdio and HTTP transport modes.**  
 
