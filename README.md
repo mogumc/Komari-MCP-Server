@@ -1,6 +1,8 @@
 # Komari-MCP-Server
 
-Go MCP server for Komari server monitoring API. Supports stdio and HTTP transport modes.
+![logo](komariMCP.png)
+
+**Go MCP server for Komari server monitoring API. Supports stdio and HTTP transport modes.**  
 
 > [!IMPORTANT]
 > 
