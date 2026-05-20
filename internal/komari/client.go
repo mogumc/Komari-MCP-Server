@@ -115,11 +115,58 @@ func (c *Client) GetVersion() (*rpc2.VersionInfo, error) {
 }
 
 // ──────────────────────────────────────────────────────────────────
+// 名称解析
+// ──────────────────────────────────────────────────────────────────
+
+// ResolveNameToUUID 通过节点名称查找对应的 UUID，支持精确匹配和模糊匹配。
+func (c *Client) ResolveNameToUUID(name string) (string, error) {
+	nodes, err := c.GetNodes("")
+	if err != nil {
+		return "", fmt.Errorf("获取节点列表失败: %w", err)
+	}
+	// 精确匹配
+	for id, info := range nodes {
+		if info.Name == name {
+			return id, nil
+		}
+	}
+	// 模糊匹配
+	var matches []string
+	for id, info := range nodes {
+		if strings.Contains(strings.ToLower(info.Name), strings.ToLower(name)) {
+			matches = append(matches, fmt.Sprintf("%s (UUID: %s)", info.Name, id))
+		}
+	}
+	if len(matches) == 1 {
+		// 单个匹配，提取 UUID
+		for id, info := range nodes {
+			if strings.Contains(strings.ToLower(info.Name), strings.ToLower(name)) {
+				return id, nil
+			}
+		}
+	} else if len(matches) > 1 {
+		return "", fmt.Errorf("名称 '%s' 匹配到多个节点: %v，请使用更精确的名称或 UUID", name, matches)
+	}
+	return "", fmt.Errorf("未找到名称为 '%s' 的节点", name)
+}
+
+// ResolveNamesToUUIDs 通过节点名称列表批量查找 UUID 列表。
+func (c *Client) ResolveNamesToUUIDs(names []string) ([]string, error) {
+	var uuids []string
+	for _, name := range names {
+		uuid, err := c.ResolveNameToUUID(name)
+		if err != nil {
+			return nil, err
+		}
+		uuids = append(uuids, uuid)
+	}
+	return uuids, nil
+}
+
+// ──────────────────────────────────────────────────────────────────
 // 合并端点
 // ──────────────────────────────────────────────────────────────────
 
-// GetNodesWithStatus 合并 getNodes + getNodesLatestStatus，一次调用获取节点信息和实时状态。
-// 这样就可以透过节点名称获取到节点信息和实时状态，避免了两次调用。
 func (c *Client) GetNodesWithStatus(uuid string) (map[string]rpc2.NodeWithStatus, error) {
 
 	type nodesResult struct {

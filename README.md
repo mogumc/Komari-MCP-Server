@@ -4,7 +4,7 @@ Go MCP server for Komari server monitoring API. Supports stdio and HTTP transpor
 
 > [!IMPORTANT]
 > 
-> **安全警告**：当配置 `KOMARI_API_KEY` 后，此 MCP 服务器会向 AI 大模型返回**节点详情（包括节点名、IP 地址、端口等敏感信息）**。  
+> **安全警告**：当配置 `KOMARI_API_KEY` 后，此 MCP 服务器会向 AI 大模型返回**更详细的节点详情（包括节点名、IP 地址、端口等敏感信息）**。  
 > 
 > 请确保 MCP 客户端的连接对象可信，避免在不受信任或公共的环境中使用 API Key。
 
@@ -125,11 +125,11 @@ curl -X POST http://localhost:8080/mcp \
 |------|------|------|
 | `komari_get_public_info` | 站点公开配置（站点名称、主题、CORS 等） | 无需 |
 | `komari_get_version` | 服务端版本号和构建哈希 | 无需 |
-| `komari_get_nodes` | 所有/指定节点信息（名称、CPU、内存、磁盘、OS 等） | 无 API Key 时隐藏节点 |
-| `komari_get_latest_status` | 节点实时状态（CPU/内存/磁盘/网络/在线状态） | 无 API Key 时隐藏节点 |
-| `komari_get_recent_status` | 节点最近约 1 分钟内的状态记录列表 | 无 API Key 时隐藏节点 |
-| `komari_get_records` | 历史监控记录（负载数据或 Ping 延迟） | 无 API Key 时隐藏节点 |
-| `komari_get_nodes_with_status` | 一次获取所有节点静态信息 + 实时状态 | 无 API Key 时隐藏节点 |
+| `komari_get_nodes` | 所有/指定节点信息（名称、CPU、内存、磁盘、OS 等），支持 uuid 或 name | 无 API Key 时隐藏节点 |
+| `komari_get_latest_status` | 节点实时状态（CPU/内存/磁盘/网络/在线状态），支持 uuid/name/uuids/names | 无 API Key 时隐藏节点 |
+| `komari_get_recent_status` | 节点最近约 1 分钟内的状态记录列表，支持 uuid 或 name | 无 API Key 时隐藏节点 |
+| `komari_get_records` | 历史监控记录（负载数据或 Ping 延迟），支持 uuid 或 name | 无 API Key 时隐藏节点 |
+| `komari_get_full_nodes_status` | 节点完整状态（静态信息 + 实时状态），支持 uuid 或 name | 无 API Key 时隐藏节点 |
 
 ## 数据单位
 

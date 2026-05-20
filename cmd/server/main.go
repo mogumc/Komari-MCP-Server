@@ -84,6 +84,7 @@ var toolList = []Tool{
 			"type": "object",
 			"properties": map[string]any{
 				"uuid": map[string]any{"type": "string", "description": "节点 UUID，留空获取全部"},
+				"name": map[string]any{"type": "string", "description": "节点名称，用于按名称筛选节点（优先级低于 uuid）"},
 			},
 		},
 	},
@@ -95,6 +96,8 @@ var toolList = []Tool{
 			"properties": map[string]any{
 				"uuid":  map[string]any{"type": "string", "description": "单个节点 UUID"},
 				"uuids": map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "多个节点 UUID 列表"},
+				"name":  map[string]any{"type": "string", "description": "单个节点名称，按名称查询实时状态（优先级低于 uuid）"},
+				"names": map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "多个节点名称列表，按名称批量查询实时状态（优先级低于 uuids）"},
 			},
 		},
 	},
@@ -104,9 +107,9 @@ var toolList = []Tool{
 		InputSchema: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
-				"uuid": map[string]any{"type": "string", "description": "节点 UUID（必填）"},
+				"uuid": map[string]any{"type": "string", "description": "节点 UUID（必填，与 name 二选一）"},
+				"name": map[string]any{"type": "string", "description": "节点名称（必填，与 uuid 二选一）"},
 			},
-			"required": []any{"uuid"},
 		},
 	},
 	{
@@ -117,6 +120,7 @@ var toolList = []Tool{
 			"properties": map[string]any{
 				"type":      map[string]any{"type": "string", "enum": []any{"load", "ping"}, "description": "记录类型：load 或 ping"},
 				"uuid":      map[string]any{"type": "string", "description": "节点 UUID，留空表示全部"},
+				"name":      map[string]any{"type": "string", "description": "节点名称，按名称查询历史记录（优先级低于 uuid）"},
 				"hours":     map[string]any{"type": "integer", "description": "时间范围（小时），默认 1。与 start/end 互斥"},
 				"start":     map[string]any{"type": "string", "description": "起始时间 RFC3339（如 2026-01-01T00:00:00Z），与 hours 互斥"},
 				"end":       map[string]any{"type": "string", "description": "结束时间 RFC3339，缺省为当前时间"},
@@ -128,12 +132,13 @@ var toolList = []Tool{
 		},
 	},
 	{
-		Name:        "komari_get_nodes_with_status",
-		Description: "一次调用获取所有节点的静态信息（名称、CPU、内存、OS 等）和实时状态（CPU 使用率、在线状态等）。减少多次查询开销。",
+		Name:        "komari_get_full_nodes_status",
+		Description: "获取节点的完整状态：静态信息（名称、CPU、内存、OS 等）+ 实时状态（CPU 使用率、在线状态等）。通过 name 或 uuid 可筛选单个节点，留空获取全部。",
 		InputSchema: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
 				"uuid": map[string]any{"type": "string", "description": "节点 UUID，留空获取全部"},
+				"name": map[string]any{"type": "string", "description": "节点名称，用于按名称筛选节点（优先级低于 uuid）"},
 			},
 		},
 	},
@@ -395,11 +400,20 @@ func (s *MCPServer) callTool(name string, rawArgs json.RawMessage) (any, error) 
 	case "komari_get_nodes":
 		var args struct {
 			UUID string `json:"uuid"`
+			Name string `json:"name"`
 		}
 		if len(rawArgs) > 0 && json.Unmarshal(rawArgs, &args) != nil {
 			return nil, fmt.Errorf("invalid arguments")
 		}
-		nodes, err := s.client.GetNodes(args.UUID)
+		uuid := args.UUID
+		if uuid == "" && args.Name != "" {
+			resolved, err := s.client.ResolveNameToUUID(args.Name)
+			if err != nil {
+				return nil, err
+			}
+			uuid = resolved
+		}
+		nodes, err := s.client.GetNodes(uuid)
 		if err != nil {
 			return nil, err
 		}
@@ -409,11 +423,31 @@ func (s *MCPServer) callTool(name string, rawArgs json.RawMessage) (any, error) 
 		var args struct {
 			UUID  string   `json:"uuid"`
 			UUIDs []string `json:"uuids"`
+			Name  string   `json:"name"`
+			Names []string `json:"names"`
 		}
 		if len(rawArgs) > 0 && json.Unmarshal(rawArgs, &args) != nil {
 			return nil, fmt.Errorf("invalid arguments")
 		}
-		status, err := s.client.GetNodesLatestStatus(args.UUID, args.UUIDs)
+		uuid := args.UUID
+		uuids := args.UUIDs
+		// 优先使用 uuid/uuids，如果未提供则尝试从 name/names 解析
+		if uuid == "" && len(uuids) == 0 {
+			if args.Name != "" {
+				resolved, err := s.client.ResolveNameToUUID(args.Name)
+				if err != nil {
+					return nil, err
+				}
+				uuid = resolved
+			} else if len(args.Names) > 0 {
+				resolved, err := s.client.ResolveNamesToUUIDs(args.Names)
+				if err != nil {
+					return nil, err
+				}
+				uuids = resolved
+			}
+		}
+		status, err := s.client.GetNodesLatestStatus(uuid, uuids)
 		if err != nil {
 			return nil, err
 		}
@@ -422,14 +456,23 @@ func (s *MCPServer) callTool(name string, rawArgs json.RawMessage) (any, error) 
 	case "komari_get_recent_status":
 		var args struct {
 			UUID string `json:"uuid"`
+			Name string `json:"name"`
 		}
 		if len(rawArgs) > 0 && json.Unmarshal(rawArgs, &args) != nil {
 			return nil, fmt.Errorf("invalid arguments")
 		}
-		if args.UUID == "" {
-			return nil, fmt.Errorf("uuid is required")
+		uuid := args.UUID
+		if uuid == "" && args.Name != "" {
+			resolved, err := s.client.ResolveNameToUUID(args.Name)
+			if err != nil {
+				return nil, err
+			}
+			uuid = resolved
 		}
-		rec, err := s.client.GetNodeRecentStatus(args.UUID)
+		if uuid == "" {
+			return nil, fmt.Errorf("uuid 或 name 至少需要提供一个")
+		}
+		rec, err := s.client.GetNodeRecentStatus(uuid)
 		if err != nil {
 			return nil, err
 		}
@@ -439,6 +482,7 @@ func (s *MCPServer) callTool(name string, rawArgs json.RawMessage) (any, error) 
 		var args struct {
 			Type     string `json:"type"`
 			UUID     string `json:"uuid"`
+			Name     string `json:"name"`
 			Hours    int    `json:"hours"`
 			Start    string `json:"start"`
 			End      string `json:"end"`
@@ -452,6 +496,14 @@ func (s *MCPServer) callTool(name string, rawArgs json.RawMessage) (any, error) 
 		if args.Type == "" {
 			return nil, fmt.Errorf("type (load or ping) is required")
 		}
+		uuid := args.UUID
+		if uuid == "" && args.Name != "" {
+			resolved, err := s.client.ResolveNameToUUID(args.Name)
+			if err != nil {
+				return nil, err
+			}
+			uuid = resolved
+		}
 		if args.Hours == 0 {
 			args.Hours = 1
 		}
@@ -464,20 +516,29 @@ func (s *MCPServer) callTool(name string, rawArgs json.RawMessage) (any, error) 
 		if args.Type == "ping" && args.TaskID != 0 {
 			taskIDStr = fmt.Sprintf("%d", args.TaskID)
 		}
-		rec, err := s.client.GetRecords(args.Type, args.UUID, args.Hours, args.MaxCount, args.LoadType, taskIDStr, args.Start, args.End)
+		rec, err := s.client.GetRecords(args.Type, uuid, args.Hours, args.MaxCount, args.LoadType, taskIDStr, args.Start, args.End)
 		if err != nil {
 			return nil, err
 		}
 		return textContent(rec), nil
 
-	case "komari_get_nodes_with_status":
+	case "komari_get_full_nodes_status":
 		var args struct {
 			UUID string `json:"uuid"`
+			Name string `json:"name"`
 		}
 		if len(rawArgs) > 0 && json.Unmarshal(rawArgs, &args) != nil {
 			return nil, fmt.Errorf("invalid arguments")
 		}
-		result, err := s.client.GetNodesWithStatus(args.UUID)
+		uuid := args.UUID
+		if uuid == "" && args.Name != "" {
+			resolved, err := s.client.ResolveNameToUUID(args.Name)
+			if err != nil {
+				return nil, err
+			}
+			uuid = resolved
+		}
+		result, err := s.client.GetNodesWithStatus(uuid)
 		if err != nil {
 			return nil, err
 		}
