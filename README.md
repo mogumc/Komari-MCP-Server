@@ -1,7 +1,5 @@
 <p align="center">
-  <a href="https://ollama.com">
-    <img src="https://github.com/mogumc/Komari-MCP-Server/raw/main/komariMCP.png" alt="komariMCP.png" width="300"/>
-  </a>
+  <img src="https://github.com/mogumc/Komari-MCP-Server/raw/main/komariMCP.png" alt="komariMCP.png" width="300"/>
 </p>
 
 # Komari-MCP-Server
